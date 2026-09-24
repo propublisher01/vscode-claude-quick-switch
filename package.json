@@ -1,0 +1,94 @@
+{
+  "name": "claude-quick-switch",
+  "displayName": "%displayName%",
+  "description": "%description%",
+  "version": "1.0.0",
+  "publisher": "proPublisher",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "claude",
+    "claude code",
+    "account",
+    "switch",
+    "profile",
+    "anthropic"
+  ],
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/propublisher01/vscode-claude-quick-switch.git"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "l10n": "./l10n",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claudeQuickSwitch.switch",
+        "title": "%command.switch.title%",
+        "category": "Claude"
+      },
+      {
+        "command": "claudeQuickSwitch.add",
+        "title": "%command.add.title%",
+        "category": "Claude"
+      },
+      {
+        "command": "claudeQuickSwitch.saveCurrent",
+        "title": "%command.saveCurrent.title%",
+        "category": "Claude"
+      },
+      {
+        "command": "claudeQuickSwitch.delete",
+        "title": "%command.delete.title%",
+        "category": "Claude"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Quick Switch",
+      "properties": {
+        "claudeQuickSwitch.reloadAfterSwitch": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "always",
+            "never"
+          ],
+          "enumDescriptions": [
+            "%config.reloadAfterSwitch.ask%",
+            "%config.reloadAfterSwitch.always%",
+            "%config.reloadAfterSwitch.never%"
+          ],
+          "default": "ask",
+          "description": "%config.reloadAfterSwitch.description%"
+        },
+        "claudeQuickSwitch.claudePath": {
+          "type": "string",
+          "default": "",
+          "description": "%config.claudePath.description%"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.5.0"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "displayName": "Claude Quick Switch",
+  "description": "Switch between multiple Claude Code accounts in two clicks from the status bar.",
+  "command.switch.title": "Switch Account",
+  "command.add.title": "Add Account",
+  "command.saveCurrent.title": "Save Current Account",
+  "command.delete.title": "Delete Profile",
+  "config.reloadAfterSwitch.description": "Reload the window after switching account (required for Claude Code to use the new account).",
+  "config.reloadAfterSwitch.ask": "Ask each time.",
+  "config.reloadAfterSwitch.always": "Reload automatically.",
+  "config.reloadAfterSwitch.never": "Never reload.",
+  "config.claudePath.description": "Path of the claude CLI used by \"Add Account\". Empty = the binary shipped with the Claude Code extension, otherwise `claude` from the PATH."
+}
