@@ -83,12 +83,15 @@
     "watch": "tsc -watch -p .",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package",
-    "publish": "vsce publish"
+    "publish": "vsce publish",
+    "publish:ovsx": "ovsx publish",
+    "publish:all": "vsce publish && ovsx publish"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.90.0",
     "@vscode/vsce": "^3.0.0",
+    "ovsx": "^1.2.0",
     "typescript": "^5.5.0"
   }
 }

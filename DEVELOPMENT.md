@@ -24,3 +24,17 @@ Then:
 npm run publish
 ```
 The `version` in `package.json` must be bumped for every publish (`npx vsce publish patch|minor`).
+
+## Publishing to Open VSX (Cursor, VSCodium, Windsurf…)
+
+One-time setup:
+1. Sign in at [open-vsx.org](https://open-vsx.org) with GitHub, link an Eclipse account and sign the Publisher Agreement (profile page)
+2. Create an access token (Settings → Access Tokens)
+3. Create the namespace: `npx ovsx create-namespace proPublisher -p <token>`
+
+Then (the token is read from the `OVSX_PAT` environment variable):
+```powershell
+$env:OVSX_PAT = "<token>"
+npm run publish:ovsx     # Open VSX only
+npm run publish:all      # Marketplace + Open VSX
+```
