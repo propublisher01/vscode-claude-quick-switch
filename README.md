@@ -40,7 +40,7 @@ Commands (`Ctrl+Shift+P`):
 
 Claude Code keeps its sign-in in two files:
 
-- `~/.claude/.credentials.json`: OAuth tokens
+- `~/.claude/.credentials.json`: OAuth tokens (on macOS: the `Claude Code-credentials` item of the login Keychain)
 - `~/.claude.json`: the `oauthAccount` key (account information)
 
 Each profile keeps a copy of this data in SecretStorage and restores it when you switch. Only the `oauthAccount` key of `~/.claude.json` is modified. `CLAUDE_CONFIG_DIR` is supported.
@@ -49,7 +49,7 @@ Each profile keeps a copy of this data in SecretStorage and restores it when you
 
 - A Claude Code session that is already open keeps using the previous account until the window is reloaded (or `claude` is restarted in the terminal).
 - If a profile is not used for a long time, its refresh token may expire: sign in again and save it again.
-- Relies on Claude Code's internal file format, which may change in future versions. On macOS, Claude Code stores credentials in the Keychain instead of `.credentials.json`, so this extension currently targets Windows and Linux.
+- Relies on Claude Code's internal file format, which may change in future versions.
 
 ## Disclaimer
 

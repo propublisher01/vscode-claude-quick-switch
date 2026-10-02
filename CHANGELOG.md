@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.0
+
+- macOS support: credentials are read from and written to the `Claude Code-credentials` item of the login Keychain, where Claude Code stores them on macOS.
+
 ## 1.0.0
 
 - First public release.

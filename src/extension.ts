@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 
 /** Profile metadata (non-sensitive, kept in globalState). */
 interface ProfileMeta {
@@ -13,7 +15,7 @@ interface ProfileMeta {
 
 /** Sensitive profile data (kept in SecretStorage). */
 interface ProfileSecret {
-  credentials: string; // raw content of .credentials.json
+  credentials: string; // raw content of .credentials.json (or of the macOS Keychain item)
   oauthAccount: unknown; // oauthAccount block of .claude.json
 }
 
@@ -47,12 +49,50 @@ function readGlobalConfig(): Record<string, any> {
   return JSON.parse(fs.readFileSync(globalConfigPath(), 'utf8'));
 }
 
+// On macOS, Claude Code keeps the OAuth tokens in the login Keychain instead of .credentials.json.
+const useKeychain = process.platform === 'darwin';
+
+function keychainService(): string {
+  // With CLAUDE_CONFIG_DIR, Claude Code suffixes the service name with a hash of that folder.
+  const dir = process.env.CLAUDE_CONFIG_DIR;
+  return dir
+    ? `Claude Code-credentials-${crypto.createHash('sha256').update(dir).digest('hex').slice(0, 8)}`
+    : 'Claude Code-credentials';
+}
+
+/** Where the credentials live, for error messages. */
+function credentialsLocation(): string {
+  return useKeychain ? `Keychain "${keychainService()}"` : credentialsPath();
+}
+
 function readCredentialsRaw(): string {
   try {
+    if (useKeychain) {
+      return execFileSync(
+        'security',
+        ['find-generic-password', '-a', os.userInfo().username, '-s', keychainService(), '-w'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+      ).replace(/\n$/, '');
+    }
     return fs.readFileSync(credentialsPath(), 'utf8');
   } catch {
     return '';
   }
+}
+
+function writeCredentialsRaw(content: string): void {
+  if (useKeychain) {
+    // Sent hex-encoded through stdin (`security -i`) so the tokens never show up in the process list.
+    const hex = Buffer.from(content, 'utf8').toString('hex');
+    const cmd = `add-generic-password -U -a "${os.userInfo().username}" -s "${keychainService()}" -X ${hex}\n`;
+    execFileSync('security', ['-i'], { input: cmd, stdio: ['pipe', 'ignore', 'pipe'] });
+    if (readCredentialsRaw() !== content) {
+      throw new Error(vscode.l10n.t('Could not write the credentials to the macOS Keychain.'));
+    }
+    return;
+  }
+  fs.mkdirSync(configDir(), { recursive: true });
+  writeFileAtomic(credentialsPath(), content);
 }
 
 /** Atomic write: temp file, then rename. */
@@ -97,7 +137,7 @@ async function captureCurrent(ctx: vscode.ExtensionContext, name: string): Promi
   }
   const credentials = readCredentialsRaw();
   if (!credentials) {
-    throw new Error(vscode.l10n.t('Credentials file not found: {0}', credentialsPath()));
+    throw new Error(vscode.l10n.t('Credentials file not found: {0}', credentialsLocation()));
   }
 
   const secret: ProfileSecret = { credentials, oauthAccount: account.oauthAccount };
@@ -140,8 +180,7 @@ async function applyProfile(ctx: vscode.ExtensionContext, profile: ProfileMeta):
 
   // Only oauthAccount is replaced in .claude.json; the rest of the config is kept.
   config.oauthAccount = secret.oauthAccount;
-  fs.mkdirSync(configDir(), { recursive: true });
-  writeFileAtomic(credentialsPath(), secret.credentials);
+  writeCredentialsRaw(secret.credentials);
   writeFileAtomic(globalConfigPath(), JSON.stringify(config, null, 2));
 }
 

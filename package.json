@@ -2,7 +2,7 @@
   "name": "claude-quick-switch",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "proPublisher",
   "license": "MIT",
   "engines": {
