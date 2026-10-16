@@ -10,6 +10,8 @@ Personal and work subscriptions, several organizations, a second account for whe
 - **Add an account without leaving VS Code**: *Add account…* runs `claude auth login` in a terminal, detects when you're signed in in the browser, and saves the new profile.
 - **Tokens stay secure**: saved accounts are stored in VS Code's SecretStorage (your OS keychain / Windows Credential Manager), never in plain text.
 - **Tokens stay fresh**: before each switch, the active profile is re-saved so tokens refreshed by Claude Code are not lost.
+- **Expiry at a glance**: each saved account shows how long its sign-in stays valid; switching to an expired one offers to sign in again.
+- **Protects against stale sessions**: if another Claude Code session (another window, a terminal) still signed in to the previous account overwrites the sign-in, you're warned, its fresh tokens are saved to the right profile, and you choose which account to keep.
 - **Non-intrusive**: only the sign-in data is swapped; the rest of your Claude Code configuration is untouched.
 - English and French interface (follows VS Code's display language).
 
@@ -48,7 +50,8 @@ Each profile keeps a copy of this data in SecretStorage and restores it when you
 ## Limitations
 
 - A Claude Code session that is already open keeps using the previous account until the window is reloaded (or `claude` is restarted in the terminal).
-- If a profile is not used for a long time, its refresh token may expire: sign in again and save it again.
+- A saved sign-in expires if the account isn't used for a while (about a week): the account list shows how long each one remains valid, and *Sign in again* renews it.
+- Close other Claude Code sessions (other windows, `claude` in terminals) before switching: they keep the previous account and may overwrite the sign-in when they refresh their tokens. The extension detects it and helps you fix it.
 - Relies on Claude Code's internal file format, which may change in future versions.
 
 ## Disclaimer

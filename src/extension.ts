@@ -10,7 +10,18 @@ interface ProfileMeta {
   name: string;
   email: string;
   organization?: string;
+  accountUuid?: string; // missing on profiles saved before 1.2.0 until migrated
+  organizationUuid?: string;
+  refreshExpiresAt?: number; // when the saved refresh token expires (ms epoch)
   savedAt: number;
+}
+
+/** Identity of an account, from .claude.json or from a profile. */
+interface AccountId {
+  email: string;
+  organization?: string;
+  accountUuid?: string;
+  organizationUuid?: string;
 }
 
 /** Sensitive profile data (kept in SecretStorage). */
@@ -25,6 +36,8 @@ const BACKUP_KEY = 'backup:last';
 const secretKey = (name: string) => `profile:${name}`;
 
 let statusItem: vscode.StatusBarItem;
+/** True while "Add account" waits for `claude auth login` (the sign-in is briefly inconsistent then). */
+let loginInProgress = false;
 
 // ---------------------------------------------------------------------------
 // Claude Code files
@@ -102,20 +115,57 @@ function writeFileAtomic(file: string, content: string): void {
   fs.renameSync(tmp, file);
 }
 
-function readCurrentAccount(): { email: string; organization?: string; oauthAccount: any } | undefined {
+function accountIdOf(oauthAccount: any): AccountId {
+  return {
+    email: oauthAccount.emailAddress,
+    organization: oauthAccount.organizationName,
+    accountUuid: oauthAccount.accountUuid,
+    organizationUuid: oauthAccount.organizationUuid,
+  };
+}
+
+function readCurrentAccount(): (AccountId & { oauthAccount: any }) | undefined {
   try {
     const oauthAccount = readGlobalConfig().oauthAccount;
     if (!oauthAccount?.emailAddress) {
       return undefined;
     }
-    return { email: oauthAccount.emailAddress, organization: oauthAccount.organizationName, oauthAccount };
+    return { ...accountIdOf(oauthAccount), oauthAccount };
   } catch {
     return undefined;
   }
 }
 
-const sameAccount = (a: { email: string; organization?: string }, b: { email: string; organization?: string }) =>
-  a.email === b.email && a.organization === b.organization;
+/** Compares by UUIDs when both sides have them (they never change), otherwise by email + organization name. */
+function sameAccount(a: AccountId, b: AccountId): boolean {
+  if (a.accountUuid && b.accountUuid) {
+    return a.accountUuid === b.accountUuid && a.organizationUuid === b.organizationUuid;
+  }
+  return a.email === b.email && a.organization === b.organization;
+}
+
+/** Non-sensitive fields of a credentials payload. */
+function parseCredentials(raw: string): { organizationUuid?: string; refreshExpiresAt?: number } {
+  try {
+    const json = JSON.parse(raw);
+    return { organizationUuid: json.organizationUuid, refreshExpiresAt: json.claudeAiOauth?.refreshTokenExpiresAt };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Current sign-in. `mismatch` is true when the tokens belong to another organization than the account
+ * in .claude.json: typically another Claude Code session (other window, terminal) still running with the
+ * previous account has refreshed and rewritten its own tokens after a switch.
+ */
+function readSignIn() {
+  const account = readCurrentAccount();
+  const credentials = readCredentialsRaw();
+  const creds = parseCredentials(credentials);
+  const mismatch = !!(account?.organizationUuid && creds.organizationUuid && account.organizationUuid !== creds.organizationUuid);
+  return { account, credentials, creds, mismatch };
+}
 
 // ---------------------------------------------------------------------------
 // Profiles
@@ -129,21 +179,15 @@ async function setProfiles(ctx: vscode.ExtensionContext, profiles: ProfileMeta[]
   await ctx.globalState.update(PROFILES_KEY, profiles);
 }
 
-/** Stores the currently signed-in account as profile `name`. */
-async function captureCurrent(ctx: vscode.ExtensionContext, name: string): Promise<ProfileMeta> {
-  const account = readCurrentAccount();
-  if (!account) {
-    throw new Error(vscode.l10n.t('No Claude account signed in. Sign in first with /login in Claude Code.'));
-  }
-  const credentials = readCredentialsRaw();
-  if (!credentials) {
-    throw new Error(vscode.l10n.t('Credentials file not found: {0}', credentialsLocation()));
-  }
-
-  const secret: ProfileSecret = { credentials, oauthAccount: account.oauthAccount };
+/** Saves a profile's secret and metadata (replacing any profile with the same name). */
+async function storeProfile(ctx: vscode.ExtensionContext, name: string, secret: ProfileSecret): Promise<ProfileMeta> {
   await ctx.secrets.store(secretKey(name), JSON.stringify(secret));
-
-  const meta: ProfileMeta = { name, email: account.email, organization: account.organization, savedAt: Date.now() };
+  const meta: ProfileMeta = {
+    name,
+    ...accountIdOf(secret.oauthAccount),
+    refreshExpiresAt: parseCredentials(secret.credentials).refreshExpiresAt,
+    savedAt: Date.now(),
+  };
   const profiles = getProfiles(ctx).filter(p => p.name !== name);
   profiles.push(meta);
   profiles.sort((a, b) => a.name.localeCompare(b.name));
@@ -151,13 +195,29 @@ async function captureCurrent(ctx: vscode.ExtensionContext, name: string): Promi
   return meta;
 }
 
+/** Stores the currently signed-in account as profile `name`. */
+async function captureCurrent(ctx: vscode.ExtensionContext, name: string): Promise<ProfileMeta> {
+  const { account, credentials, mismatch } = readSignIn();
+  if (!account) {
+    throw new Error(vscode.l10n.t('No Claude account signed in. Sign in first with /login in Claude Code.'));
+  }
+  if (!credentials) {
+    throw new Error(vscode.l10n.t('Credentials file not found: {0}', credentialsLocation()));
+  }
+  if (mismatch) {
+    // Saving now would file another account's tokens under this profile.
+    throw new Error(vscode.l10n.t('The Claude sign-in is inconsistent (tokens of another account). Switch account again first.'));
+  }
+  return storeProfile(ctx, name, { credentials, oauthAccount: account.oauthAccount });
+}
+
 /**
  * Updates the profile matching the active account, so tokens refreshed by Claude Code
  * since the last save are not lost.
  */
 async function refreshActiveProfile(ctx: vscode.ExtensionContext): Promise<void> {
-  const account = readCurrentAccount();
-  if (!account) {
+  const { account, mismatch } = readSignIn();
+  if (!account || mismatch) {
     return;
   }
   const match = getProfiles(ctx).find(p => sameAccount(p, account));
@@ -166,12 +226,68 @@ async function refreshActiveProfile(ctx: vscode.ExtensionContext): Promise<void>
   }
 }
 
+async function readProfileSecret(ctx: vscode.ExtensionContext, name: string): Promise<ProfileSecret | undefined> {
+  const raw = await ctx.secrets.get(secretKey(name));
+  return raw ? JSON.parse(raw) : undefined;
+}
+
+/** Fills the UUIDs and expiry of profiles saved before 1.2.0 (they only had email + organization name). */
+async function migrateProfiles(ctx: vscode.ExtensionContext): Promise<void> {
+  const profiles = getProfiles(ctx);
+  let changed = false;
+  for (const p of profiles) {
+    if (p.accountUuid) {
+      continue;
+    }
+    const secret = await readProfileSecret(ctx, p.name);
+    if (!secret) {
+      continue;
+    }
+    const id = accountIdOf(secret.oauthAccount);
+    p.accountUuid = id.accountUuid;
+    p.organizationUuid = id.organizationUuid;
+    p.refreshExpiresAt = parseCredentials(secret.credentials).refreshExpiresAt;
+    changed = true;
+  }
+  if (changed) {
+    await setProfiles(ctx, profiles);
+  }
+}
+
+/** Expiry of a profile's sign-in: live from Claude Code for the active account, else as saved. */
+function profileExpiry(p: ProfileMeta, active: boolean): number | undefined {
+  return active ? readSignIn().creds.refreshExpiresAt ?? p.refreshExpiresAt : p.refreshExpiresAt;
+}
+
+const DAY = 24 * 60 * 60 * 1000;
+
+function isExpired(expiresAt: number | undefined): boolean {
+  return !!expiresAt && expiresAt <= Date.now();
+}
+
+/** Short text for the account list, e.g. "Sign-in valid for 5 days". */
+function describeExpiry(expiresAt: number | undefined): string | undefined {
+  if (!expiresAt) {
+    return undefined;
+  }
+  const left = expiresAt - Date.now();
+  if (left <= 0) {
+    return `$(error) ${vscode.l10n.t('Sign-in expired — sign in again')}`;
+  }
+  if (left < DAY) {
+    return `$(warning) ${vscode.l10n.t('Sign-in expires in {0} h', Math.max(1, Math.floor(left / (60 * 60 * 1000))))}`;
+  }
+  const days = Math.floor(left / DAY);
+  return days < 2
+    ? `$(warning) ${vscode.l10n.t('Sign-in expires in {0} day', days)}`
+    : vscode.l10n.t('Sign-in valid for {0} days', days);
+}
+
 async function applyProfile(ctx: vscode.ExtensionContext, profile: ProfileMeta): Promise<void> {
-  const raw = await ctx.secrets.get(secretKey(profile.name));
-  if (!raw) {
+  const secret = await readProfileSecret(ctx, profile.name);
+  if (!secret) {
     throw new Error(vscode.l10n.t('Data for profile "{0}" not found. Save it again.', profile.name));
   }
-  const secret: ProfileSecret = JSON.parse(raw);
 
   // Safety backup of the current sign-in, kept in SecretStorage (never in plain text on disk).
   const config = readGlobalConfig();
@@ -247,11 +363,11 @@ async function cmdSwitch(ctx: vscode.ExtensionContext): Promise<void> {
 
   type Item = vscode.QuickPickItem & { profile?: ProfileMeta; action?: 'add' | 'save' };
   const items: Item[] = profiles.map(p => {
-    const active = current && sameAccount(p, current);
+    const active = !!current && sameAccount(p, current);
     return {
       label: `${active ? '$(check)' : '$(account)'} ${p.name}`,
       description: p.email,
-      detail: p.organization,
+      detail: [p.organization, describeExpiry(profileExpiry(p, active))].filter(Boolean).join('  ·  ') || undefined,
       profile: p,
     };
   });
@@ -280,6 +396,22 @@ async function cmdSwitch(ctx: vscode.ExtensionContext): Promise<void> {
   if (current && sameAccount(target, current)) {
     vscode.window.showInformationMessage(vscode.l10n.t('Already signed in to "{0}".', target.name));
     return;
+  }
+  if (isExpired(target.refreshExpiresAt)) {
+    const signIn = vscode.l10n.t('Sign in again');
+    const anyway = vscode.l10n.t('Switch anyway');
+    const choice = await vscode.window.showWarningMessage(
+      vscode.l10n.t('The saved sign-in of "{0}" has expired. Sign in to this account again?', target.name),
+      { modal: true },
+      signIn,
+      anyway,
+    );
+    if (choice === signIn) {
+      return cmdAdd(ctx);
+    }
+    if (choice !== anyway) {
+      return;
+    }
   }
 
   try {
@@ -365,6 +497,15 @@ async function cmdAdd(ctx: vscode.ExtensionContext): Promise<void> {
   }
 
   // 2. Run "claude auth login" in a terminal (opens the browser).
+  loginInProgress = true;
+  try {
+    await signInNewAccount(ctx, current);
+  } finally {
+    loginInProgress = false;
+  }
+}
+
+async function signInNewAccount(ctx: vscode.ExtensionContext, current: AccountId | undefined): Promise<void> {
   const before = { credentials: readCredentialsRaw(), account: current };
   const bin = findClaudeBinary();
   const terminal = bin
@@ -439,21 +580,95 @@ async function cmdAdd(ctx: vscode.ExtensionContext): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Sign-in overwritten by another Claude Code session
+// ---------------------------------------------------------------------------
+
+/** Mismatch already reported (account org | tokens org), so the same one is not reported twice. */
+let reportedMismatch: string | undefined;
+/** A mismatch was seen while this window was not focused: report it on focus (avoids one popup per window). */
+let pendingCheck = false;
+
+async function checkSignIn(ctx: vscode.ExtensionContext): Promise<void> {
+  if (loginInProgress) {
+    return;
+  }
+  const { account, credentials, creds, mismatch } = readSignIn();
+  if (!mismatch || !account) {
+    reportedMismatch = undefined;
+    return;
+  }
+  const key = `${account.organizationUuid}|${creds.organizationUuid}`;
+  if (key === reportedMismatch) {
+    return;
+  }
+  if (!vscode.window.state.focused) {
+    pendingCheck = true;
+    return;
+  }
+  reportedMismatch = key;
+
+  const profiles = getProfiles(ctx);
+  const owners = profiles.filter(p => p.organizationUuid === creds.organizationUuid);
+  const owner = owners.length === 1 ? owners[0] : undefined;
+  const shown = profiles.find(p => sameAccount(p, account));
+
+  // These fresh tokens belong to `owner`; the ones saved in its profile may already have been rotated out.
+  const ownerSecret = owner && (await readProfileSecret(ctx, owner.name));
+  if (owner && ownerSecret) {
+    await storeProfile(ctx, owner.name, { credentials, oauthAccount: ownerSecret.oauthAccount });
+  }
+
+  const useShown = shown && vscode.l10n.t('Use "{0}"', shown.name);
+  const useOwner = owner && ownerSecret && vscode.l10n.t('Use "{0}"', owner.name);
+  const choice = await vscode.window.showWarningMessage(
+    vscode.l10n.t(
+      'Another Claude Code session (another window or a terminal) is still signed in to {0} and has overwritten the sign-in. Close it, then choose the account to use.',
+      owner ? `"${owner.name}"` : vscode.l10n.t('another account'),
+    ),
+    ...[useShown, useOwner].filter((x): x is string => !!x),
+  );
+  try {
+    if (choice && choice === useShown) {
+      await applyProfile(ctx, shown!);
+      updateStatus(ctx);
+      await offerReload(vscode.l10n.t('Claude account: {0} ({1}).', shown!.name, shown!.email));
+    } else if (choice && choice === useOwner) {
+      // Keep the tokens as they are and make .claude.json match them.
+      const config = readGlobalConfig();
+      config.oauthAccount = ownerSecret!.oauthAccount;
+      writeFileAtomic(globalConfigPath(), JSON.stringify(config, null, 2));
+      updateStatus(ctx);
+      await offerReload(vscode.l10n.t('Claude account: {0} ({1}).', owner!.name, owner!.email));
+    }
+  } catch (e) {
+    vscode.window.showErrorMessage(vscode.l10n.t('Account switch failed: {0}', (e as Error).message));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Status bar
 // ---------------------------------------------------------------------------
 
 function updateStatus(ctx: vscode.ExtensionContext): void {
-  const account = readCurrentAccount();
+  const { account, mismatch } = readSignIn();
+  statusItem.backgroundColor = undefined;
   if (!account) {
     statusItem.text = `$(sparkle) ${vscode.l10n.t('Claude: signed out')}`;
     statusItem.tooltip = vscode.l10n.t('No Claude account signed in');
   } else {
     const profile = getProfiles(ctx).find(p => sameAccount(p, account));
-    statusItem.text = `$(sparkle) Claude: ${profile?.name ?? account.email}`;
+    statusItem.text = `${mismatch ? '$(warning)' : '$(sparkle)'} Claude: ${profile?.name ?? account.email}`;
+    const warning = mismatch
+      ? `\n\n$(warning) ${vscode.l10n.t('Inconsistent sign-in: another Claude Code session has overwritten the tokens. Switch account to fix it.')}`
+      : '';
     statusItem.tooltip = new vscode.MarkdownString(
       `**${vscode.l10n.t('Claude account')}**\n\n${account.email}${account.organization ? `\n\n${account.organization}` : ''}` +
-        `${profile ? '' : `\n\n_${vscode.l10n.t('Not saved')}_`}\n\n${vscode.l10n.t('Click to switch account')}`,
+        `${profile ? '' : `\n\n_${vscode.l10n.t('Not saved')}_`}${warning}\n\n${vscode.l10n.t('Click to switch account')}`,
+      true,
     );
+    if (mismatch) {
+      statusItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+    }
   }
   statusItem.show();
 }
@@ -473,16 +688,41 @@ export function activate(ctx: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeQuickSwitch.delete', () => cmdDelete(ctx)),
   );
 
-  // Refresh the status bar when the account changes outside the extension (/login, /logout, another window).
+  // Refresh the status bar when the account changes outside the extension (/login, /logout, another window),
+  // and report tokens overwritten by another session. Writes to the macOS Keychain touch its database file.
   let timer: NodeJS.Timeout | undefined;
   const onChange = () => {
     clearTimeout(timer);
-    timer = setTimeout(() => updateStatus(ctx), 500);
+    timer = setTimeout(() => {
+      updateStatus(ctx);
+      if (readSignIn().mismatch) {
+        // A sign-in writes the tokens then .claude.json: only report a mismatch that lasts.
+        setTimeout(() => checkSignIn(ctx), 3000);
+      }
+    }, 500);
   };
-  fs.watchFile(globalConfigPath(), { interval: 3000 }, onChange);
-  ctx.subscriptions.push({ dispose: () => fs.unwatchFile(globalConfigPath(), onChange) });
+  const watched = [
+    globalConfigPath(),
+    useKeychain ? path.join(os.homedir(), 'Library', 'Keychains', 'login.keychain-db') : credentialsPath(),
+  ];
+  for (const file of watched) {
+    fs.watchFile(file, { interval: 3000 }, onChange);
+    ctx.subscriptions.push({ dispose: () => fs.unwatchFile(file, onChange) });
+  }
+  ctx.subscriptions.push(
+    vscode.window.onDidChangeWindowState(state => {
+      if (state.focused && pendingCheck) {
+        pendingCheck = false;
+        checkSignIn(ctx);
+      }
+    }),
+  );
 
   updateStatus(ctx);
+  migrateProfiles(ctx).then(() => {
+    updateStatus(ctx);
+    checkSignIn(ctx);
+  });
 }
 
 export function deactivate(): void {}
