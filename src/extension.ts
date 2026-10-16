@@ -340,7 +340,7 @@ async function cmdSaveCurrent(ctx: vscode.ExtensionContext): Promise<void> {
 }
 
 async function offerReload(message: string): Promise<void> {
-  const mode = vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('reloadAfterSwitch', 'ask');
+  const mode = vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('reloadAfterSwitch', 'never');
   if (mode === 'always') {
     vscode.commands.executeCommand('workbench.action.reloadWindow');
   } else if (mode === 'ask') {

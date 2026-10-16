@@ -6,7 +6,7 @@ Personal and work subscriptions, several organizations, a second account for whe
 
 ## Features
 
-- **One-click switch**: click `✨ Claude: <profile>` in the status bar and pick an account.
+- **One-click switch**: click `✨ Claude: <profile>` in the status bar and pick an account. Claude Code picks it up right away, in every window — no reload needed.
 - **Add an account without leaving VS Code**: *Add account…* runs `claude auth login` in a terminal, detects when you're signed in in the browser, and saves the new profile.
 - **Tokens stay secure**: saved accounts are stored in VS Code's SecretStorage (your OS keychain / Windows Credential Manager), never in plain text.
 - **Tokens stay fresh**: before each switch, the active profile is re-saved so tokens refreshed by Claude Code are not lost.
@@ -20,7 +20,7 @@ Personal and work subscriptions, several organizations, a second account for whe
 1. Click `✨ Claude: …` in the status bar (bottom right).
 2. The first time, choose **Save current account…** to save the account you're signed in with.
 3. Choose **Add account…** to sign in with another account in your browser. It is saved automatically once signed in.
-4. From then on, pick any profile in the list to switch, then reload the window.
+4. From then on, pick any profile in the list to switch.
 
 Commands (`Ctrl+Shift+P`):
 
@@ -35,7 +35,7 @@ Commands (`Ctrl+Shift+P`):
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `claudeQuickSwitch.reloadAfterSwitch` | `ask` | `ask`, `always` or `never` reload the window after switching. A reload is needed for Claude Code to use the new account. |
+| `claudeQuickSwitch.reloadAfterSwitch` | `never` | `ask`, `always` or `never` reload the window after switching. Not needed with current versions of Claude Code. |
 | `claudeQuickSwitch.claudePath` | *(empty)* | Path of the `claude` CLI used by *Add account*. Empty = the binary shipped with the Claude Code extension, otherwise `claude` from the PATH. |
 
 ## How it works
@@ -49,9 +49,8 @@ Each profile keeps a copy of this data in SecretStorage and restores it when you
 
 ## Limitations
 
-- A Claude Code session that is already open keeps using the previous account until the window is reloaded (or `claude` is restarted in the terminal).
 - A saved sign-in expires if the account isn't used for a while (about a week): the account list shows how long each one remains valid, and *Sign in again* renews it.
-- Close other Claude Code sessions (other windows, `claude` in terminals) before switching: they keep the previous account and may overwrite the sign-in when they refresh their tokens. The extension detects it and helps you fix it.
+- Should an older Claude Code session (e.g. an old `claude` in a terminal) keep the previous account and overwrite the sign-in, the extension detects it and helps you fix it.
 - Relies on Claude Code's internal file format, which may change in future versions.
 
 ## Disclaimer

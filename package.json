@@ -67,7 +67,7 @@
             "%config.reloadAfterSwitch.always%",
             "%config.reloadAfterSwitch.never%"
           ],
-          "default": "ask",
+          "default": "never",
           "description": "%config.reloadAfterSwitch.description%"
         },
         "claudeQuickSwitch.claudePath": {
