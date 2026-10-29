@@ -7,6 +7,7 @@ Personal and work subscriptions, several organizations, a second account for whe
 ## Features
 
 - **One-click switch**: click `✨ Claude: <profile>` in the status bar and pick an account. Claude Code picks it up right away, in every window — no reload needed.
+- **Back and forth in one keystroke**: `Ctrl+Alt+Shift+C` (`Cmd+Alt+Shift+C` on macOS) switches back to the previous account.
 - **Add an account without leaving VS Code**: *Add account…* runs `claude auth login` in a terminal, detects when you're signed in in the browser, and saves the new profile.
 - **Tokens stay secure**: saved accounts are stored in VS Code's SecretStorage (your OS keychain / Windows Credential Manager), never in plain text.
 - **Tokens stay fresh**: before each switch, the active profile is re-saved so tokens refreshed by Claude Code are not lost.
@@ -20,15 +21,18 @@ Personal and work subscriptions, several organizations, a second account for whe
 1. Click `✨ Claude: …` in the status bar (bottom right).
 2. The first time, choose **Save current account…** to save the account you're signed in with.
 3. Choose **Add account…** to sign in with another account in your browser. It is saved automatically once signed in.
-4. From then on, pick any profile in the list to switch.
+4. From then on, pick any profile in the list to switch, or press `Ctrl+Alt+Shift+C` (`Cmd+Alt+Shift+C` on macOS) to go back to the previous account.
+5. Use the ✏️ and 🗑 buttons next to an account in the list to rename or delete it.
 
 Commands (`Ctrl+Shift+P`):
 
 | Command | Description |
 | --- | --- |
 | `Claude: Switch Account` | Pick a saved account |
+| `Claude: Switch to Previous Account` | Go back to the account used before the last switch (`Ctrl+Alt+Shift+C` / `Cmd+Alt+Shift+C`) |
 | `Claude: Add Account` | Sign in with a new account and save it |
 | `Claude: Save Current Account` | Save (or update) the signed-in account |
+| `Claude: Rename Profile` | Rename a saved account |
 | `Claude: Delete Profile` | Remove a saved account |
 
 ## Settings

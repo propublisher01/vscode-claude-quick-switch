@@ -9,5 +9,7 @@
   "config.reloadAfterSwitch.ask": "Demander à chaque fois.",
   "config.reloadAfterSwitch.always": "Recharger automatiquement.",
   "config.reloadAfterSwitch.never": "Ne jamais recharger.",
-  "config.claudePath.description": "Chemin du CLI claude utilisé par « Ajouter un compte ». Vide = binaire fourni par l'extension Claude Code, sinon `claude` du PATH."
+  "config.claudePath.description": "Chemin du CLI claude utilisé par « Ajouter un compte ». Vide = binaire fourni par l'extension Claude Code, sinon `claude` du PATH.",
+  "command.switchPrevious.title": "Revenir au compte précédent",
+  "command.rename.title": "Renommer un profil"
 }

@@ -9,5 +9,7 @@
   "config.reloadAfterSwitch.ask": "Ask each time.",
   "config.reloadAfterSwitch.always": "Reload automatically.",
   "config.reloadAfterSwitch.never": "Never reload.",
-  "config.claudePath.description": "Path of the claude CLI used by \"Add Account\". Empty = the binary shipped with the Claude Code extension, otherwise `claude` from the PATH."
+  "config.claudePath.description": "Path of the claude CLI used by \"Add Account\". Empty = the binary shipped with the Claude Code extension, otherwise `claude` from the PATH.",
+  "command.switchPrevious.title": "Switch to Previous Account",
+  "command.rename.title": "Rename Profile"
 }

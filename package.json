@@ -2,7 +2,7 @@
   "name": "claude-quick-switch",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "publisher": "proPublisher",
   "license": "MIT",
   "engines": {
@@ -37,6 +37,11 @@
         "category": "Claude"
       },
       {
+        "command": "claudeQuickSwitch.switchPrevious",
+        "title": "%command.switchPrevious.title%",
+        "category": "Claude"
+      },
+      {
         "command": "claudeQuickSwitch.add",
         "title": "%command.add.title%",
         "category": "Claude"
@@ -44,6 +49,11 @@
       {
         "command": "claudeQuickSwitch.saveCurrent",
         "title": "%command.saveCurrent.title%",
+        "category": "Claude"
+      },
+      {
+        "command": "claudeQuickSwitch.rename",
+        "title": "%command.rename.title%",
         "category": "Claude"
       },
       {
@@ -76,7 +86,14 @@
           "description": "%config.claudePath.description%"
         }
       }
-    }
+    },
+    "keybindings": [
+      {
+        "command": "claudeQuickSwitch.switchPrevious",
+        "key": "ctrl+alt+shift+c",
+        "mac": "cmd+alt+shift+c"
+      }
+    ]
   },
   "scripts": {
     "compile": "tsc -p .",
@@ -85,7 +102,8 @@
     "package": "vsce package",
     "publish": "vsce publish",
     "publish:ovsx": "ovsx publish",
-    "publish:all": "vsce publish && ovsx publish"
+    "publish:all": "vsce publish && ovsx publish",
+    "test": "npm run compile && node --test test/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

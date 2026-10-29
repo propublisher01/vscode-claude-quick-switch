@@ -4,7 +4,10 @@
 npm install
 npm run compile   # or F5 in VS Code to launch an Extension Development Host
 npm run package   # builds the .vsix
+npm test          # compiles, then runs the tests
 ```
+
+Tests (`test/`) use Node's built-in test runner with a fake `vscode` API and a temporary `CLAUDE_CONFIG_DIR`. They always use file-based credentials, so running them on macOS never touches the Keychain.
 
 Local install: `code --install-extension claude-quick-switch-<version>.vsix`
 

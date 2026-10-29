@@ -33,6 +33,7 @@ interface ProfileSecret {
 const CONFIG_SECTION = 'claudeQuickSwitch';
 const PROFILES_KEY = 'profiles';
 const BACKUP_KEY = 'backup:last';
+const PREVIOUS_KEY = 'previousProfile';
 const secretKey = (name: string) => `profile:${name}`;
 
 let statusItem: vscode.StatusBarItem;
@@ -357,42 +358,9 @@ async function offerReload(message: string): Promise<void> {
   }
 }
 
-async function cmdSwitch(ctx: vscode.ExtensionContext): Promise<void> {
-  const profiles = getProfiles(ctx);
+/** Switches to `target`: checks expiry, keeps the active profile's fresh tokens, then swaps the sign-in. */
+async function switchTo(ctx: vscode.ExtensionContext, target: ProfileMeta): Promise<void> {
   const current = readCurrentAccount();
-
-  type Item = vscode.QuickPickItem & { profile?: ProfileMeta; action?: 'add' | 'save' };
-  const items: Item[] = profiles.map(p => {
-    const active = !!current && sameAccount(p, current);
-    return {
-      label: `${active ? '$(check)' : '$(account)'} ${p.name}`,
-      description: p.email,
-      detail: [p.organization, describeExpiry(profileExpiry(p, active))].filter(Boolean).join('  ·  ') || undefined,
-      profile: p,
-    };
-  });
-  items.push(
-    { label: '', kind: vscode.QuickPickItemKind.Separator },
-    { label: `$(add) ${vscode.l10n.t('Add account…')}`, action: 'add' },
-  );
-  if (current && !profiles.some(p => sameAccount(p, current))) {
-    items.push({ label: `$(save) ${vscode.l10n.t('Save current account…')}`, description: current.email, action: 'save' });
-  }
-
-  const pick = await vscode.window.showQuickPick(items, {
-    title: vscode.l10n.t('Switch Claude account'),
-    placeHolder: profiles.length ? vscode.l10n.t('Pick an account') : vscode.l10n.t('No profile yet — add or save an account'),
-  });
-  if (!pick) {
-    return;
-  }
-  if (pick.action === 'add') {
-    return cmdAdd(ctx);
-  }
-  if (pick.action === 'save') {
-    return cmdSaveCurrent(ctx);
-  }
-  const target = pick.profile!;
   if (current && sameAccount(target, current)) {
     vscode.window.showInformationMessage(vscode.l10n.t('Already signed in to "{0}".', target.name));
     return;
@@ -414,6 +382,7 @@ async function cmdSwitch(ctx: vscode.ExtensionContext): Promise<void> {
     }
   }
 
+  const leaving = current && getProfiles(ctx).find(p => sameAccount(p, current));
   try {
     await refreshActiveProfile(ctx);
     await applyProfile(ctx, target);
@@ -421,35 +390,158 @@ async function cmdSwitch(ctx: vscode.ExtensionContext): Promise<void> {
     vscode.window.showErrorMessage(vscode.l10n.t('Account switch failed: {0}', (e as Error).message));
     return;
   }
+  if (leaving) {
+    await ctx.globalState.update(PREVIOUS_KEY, leaving.name);
+  }
   updateStatus(ctx);
   await offerReload(vscode.l10n.t('Claude account: {0} ({1}).', target.name, target.email));
 }
 
-async function cmdDelete(ctx: vscode.ExtensionContext): Promise<void> {
+async function cmdSwitch(ctx: vscode.ExtensionContext): Promise<void> {
   const profiles = getProfiles(ctx);
+  const current = readCurrentAccount();
+
+  const renameButton: vscode.QuickInputButton = { iconPath: new vscode.ThemeIcon('edit'), tooltip: vscode.l10n.t('Rename') };
+  const deleteButton: vscode.QuickInputButton = { iconPath: new vscode.ThemeIcon('trash'), tooltip: vscode.l10n.t('Delete') };
+
+  type Item = vscode.QuickPickItem & { profile?: ProfileMeta; action?: 'add' | 'save' };
+  const items: Item[] = profiles.map(p => {
+    const active = !!current && sameAccount(p, current);
+    return {
+      label: `${active ? '$(check)' : '$(account)'} ${p.name}`,
+      description: p.email,
+      detail: [p.organization, describeExpiry(profileExpiry(p, active))].filter(Boolean).join('  ·  ') || undefined,
+      buttons: [renameButton, deleteButton],
+      profile: p,
+    };
+  });
+  items.push(
+    { label: '', kind: vscode.QuickPickItemKind.Separator },
+    { label: `$(add) ${vscode.l10n.t('Add account…')}`, action: 'add' },
+  );
+  if (current && !profiles.some(p => sameAccount(p, current))) {
+    items.push({ label: `$(save) ${vscode.l10n.t('Save current account…')}`, description: current.email, action: 'save' });
+  }
+
+  const qp = vscode.window.createQuickPick<Item>();
+  qp.title = vscode.l10n.t('Switch Claude account');
+  qp.placeholder = profiles.length ? vscode.l10n.t('Pick an account') : vscode.l10n.t('No profile yet — add or save an account');
+  qp.items = items;
+  const { item, button } = await new Promise<{ item?: Item; button?: vscode.QuickInputButton }>(resolve => {
+    qp.onDidAccept(() => resolve({ item: qp.selectedItems[0] }));
+    qp.onDidTriggerItemButton(e => resolve({ item: e.item, button: e.button }));
+    qp.onDidHide(() => resolve({}));
+    qp.show();
+  });
+  qp.dispose();
+
+  if (!item) {
+    return;
+  }
+  if (button && item.profile) {
+    // Rename / delete from the list, then reopen it.
+    const done = button === renameButton ? await renameProfile(ctx, item.profile) : await deleteProfile(ctx, item.profile);
+    return done ? cmdSwitch(ctx) : undefined;
+  }
+  if (item.action === 'add') {
+    return cmdAdd(ctx);
+  }
+  if (item.action === 'save') {
+    return cmdSaveCurrent(ctx);
+  }
+  return switchTo(ctx, item.profile!);
+}
+
+/** Toggles back to the account used before the last switch (or the only other one). */
+async function cmdSwitchPrevious(ctx: vscode.ExtensionContext): Promise<void> {
+  const current = readCurrentAccount();
+  const others = getProfiles(ctx).filter(p => !current || !sameAccount(p, current));
+  const previousName = ctx.globalState.get<string>(PREVIOUS_KEY);
+  const target = others.find(p => p.name === previousName) ?? (others.length === 1 ? others[0] : undefined);
+  return target ? switchTo(ctx, target) : cmdSwitch(ctx);
+}
+
+/** Lets the user pick a profile (for the palette commands). */
+async function pickProfile(title: string, profiles: ProfileMeta[]): Promise<ProfileMeta | undefined> {
   if (!profiles.length) {
     vscode.window.showInformationMessage(vscode.l10n.t('No saved profile.'));
     return;
   }
   const pick = await vscode.window.showQuickPick(
     profiles.map(p => ({ label: p.name, description: p.email, profile: p })),
-    { title: vscode.l10n.t('Delete a Claude profile') },
+    { title },
   );
-  if (!pick) {
-    return;
+  return pick?.profile;
+}
+
+/** Renames a profile. Returns true when renamed. */
+async function renameProfile(ctx: vscode.ExtensionContext, profile: ProfileMeta): Promise<boolean> {
+  const profiles = getProfiles(ctx);
+  const input = await vscode.window.showInputBox({
+    title: vscode.l10n.t('Rename profile "{0}"', profile.name),
+    value: profile.name,
+    validateInput: v => {
+      const name = v.trim();
+      if (!name) {
+        return vscode.l10n.t('Name cannot be empty');
+      }
+      return name !== profile.name && profiles.some(p => p.name === name)
+        ? vscode.l10n.t('A profile named "{0}" already exists.', name)
+        : undefined;
+    },
+  });
+  const name = input?.trim();
+  if (!name || name === profile.name) {
+    return false;
   }
+  const secret = await readProfileSecret(ctx, profile.name);
+  if (secret) {
+    await ctx.secrets.store(secretKey(name), JSON.stringify(secret));
+  }
+  await ctx.secrets.delete(secretKey(profile.name));
+  await setProfiles(
+    ctx,
+    profiles.map(p => (p.name === profile.name ? { ...p, name } : p)).sort((a, b) => a.name.localeCompare(b.name)),
+  );
+  if (ctx.globalState.get<string>(PREVIOUS_KEY) === profile.name) {
+    await ctx.globalState.update(PREVIOUS_KEY, name);
+  }
+  updateStatus(ctx);
+  return true;
+}
+
+/** Deletes a profile after confirmation. Returns true when deleted. */
+async function deleteProfile(ctx: vscode.ExtensionContext, profile: ProfileMeta): Promise<boolean> {
   const del = vscode.l10n.t('Delete');
   const confirm = await vscode.window.showWarningMessage(
-    vscode.l10n.t('Delete profile "{0}"? (the currently signed-in account is not signed out)', pick.profile.name),
+    vscode.l10n.t('Delete profile "{0}"? (the currently signed-in account is not signed out)', profile.name),
     { modal: true },
     del,
   );
   if (confirm !== del) {
-    return;
+    return false;
   }
-  await ctx.secrets.delete(secretKey(pick.profile.name));
-  await setProfiles(ctx, profiles.filter(p => p.name !== pick.profile.name));
+  await ctx.secrets.delete(secretKey(profile.name));
+  await setProfiles(ctx, getProfiles(ctx).filter(p => p.name !== profile.name));
+  if (ctx.globalState.get<string>(PREVIOUS_KEY) === profile.name) {
+    await ctx.globalState.update(PREVIOUS_KEY, undefined);
+  }
   updateStatus(ctx);
+  return true;
+}
+
+async function cmdRename(ctx: vscode.ExtensionContext): Promise<void> {
+  const profile = await pickProfile(vscode.l10n.t('Rename a Claude profile'), getProfiles(ctx));
+  if (profile) {
+    await renameProfile(ctx, profile);
+  }
+}
+
+async function cmdDelete(ctx: vscode.ExtensionContext): Promise<void> {
+  const profile = await pickProfile(vscode.l10n.t('Delete a Claude profile'), getProfiles(ctx));
+  if (profile) {
+    await deleteProfile(ctx, profile);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -574,6 +666,10 @@ async function signInNewAccount(ctx: vscode.ExtensionContext, current: AccountId
   // 4. Save the new account.
   const meta = await promptAndSave(ctx, vscode.l10n.t('New Claude account signed in'));
   updateStatus(ctx);
+  const left = current && getProfiles(ctx).find(p => sameAccount(p, current));
+  if (meta && left && !sameAccount(left, meta)) {
+    await ctx.globalState.update(PREVIOUS_KEY, left.name);
+  }
   if (meta) {
     await offerReload(vscode.l10n.t('Account "{0}" ({1}) added and active.', meta.name, meta.email));
   }
@@ -685,6 +781,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeQuickSwitch.switch', () => cmdSwitch(ctx)),
     vscode.commands.registerCommand('claudeQuickSwitch.add', () => cmdAdd(ctx)),
     vscode.commands.registerCommand('claudeQuickSwitch.saveCurrent', () => cmdSaveCurrent(ctx)),
+    vscode.commands.registerCommand('claudeQuickSwitch.switchPrevious', () => cmdSwitchPrevious(ctx)),
+    vscode.commands.registerCommand('claudeQuickSwitch.rename', () => cmdRename(ctx)),
     vscode.commands.registerCommand('claudeQuickSwitch.delete', () => cmdDelete(ctx)),
   );
 

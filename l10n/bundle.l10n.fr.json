@@ -1,4 +1,5 @@
 {
+  "A profile named \"{0}\" already exists.": "Un profil nommé « {0} » existe déjà.",
   "Account \"{0}\" ({1}) added and active.": "Compte « {0} » ({1}) ajouté et actif.",
   "Account switch failed: {0}": "Échec du changement de compte : {0}",
   "Add account…": "Ajouter un compte…",
@@ -30,6 +31,9 @@
   "Profile name for {0}": "Nom du profil pour {0}",
   "Reload": "Recharger",
   "Reload the window so Claude Code uses it?": "Recharger la fenêtre pour que Claude Code l'utilise ?",
+  "Rename": "Renommer",
+  "Rename a Claude profile": "Renommer un profil Claude",
+  "Rename profile \"{0}\"": "Renommer le profil « {0} »",
   "Save": "Enregistrer",
   "Save current account…": "Enregistrer le compte actuel…",
   "Save current Claude account": "Enregistrer le compte Claude actuel",
