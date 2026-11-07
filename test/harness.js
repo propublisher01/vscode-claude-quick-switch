@@ -23,11 +23,23 @@ const account = (n, org = `org-${n}`) => ({
   emailAddress: `${n}@example.com`,
   organizationName: `${n} org`,
 });
-const credentials = (token, org, expiresInDays) =>
+const credentials = (token, org, expiresInDays, extra = {}) =>
   JSON.stringify({
-    claudeAiOauth: { accessToken: `at-${token}`, refreshToken: `rt-${token}`, refreshTokenExpiresAt: Date.now() + expiresInDays * DAY },
+    claudeAiOauth: {
+      accessToken: `at-${token}`,
+      refreshToken: `rt-${token}`,
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      refreshTokenExpiresAt: Date.now() + expiresInDays * DAY,
+      ...extra,
+    },
     organizationUuid: org,
   });
+
+/** Body of the usage service. */
+const usageBody = (fiveHour, sevenDay, resetsInHours = 2) => ({
+  five_hour: { utilization: fiveHour, resets_at: new Date(Date.now() + resetsInHours * 3600e3).toISOString() },
+  seven_day: { utilization: sevenDay, resets_at: new Date(Date.now() + 3 * DAY).toISOString() },
+});
 
 /**
  * Builds a fresh extension instance. `ui.answers` is a queue consumed by every UI prompt, in order:
@@ -40,7 +52,21 @@ function setup() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-quick-switch-'));
   process.env.CLAUDE_CONFIG_DIR = dir;
 
-  const ui = { answers: [], messages: [], validationErrors: [], lastItems: undefined };
+  const ui = {
+    answers: [],
+    messages: [],
+    validationErrors: [],
+    lastItems: undefined,
+    statusItem: undefined,
+    config: {}, // claudeQuickSwitch.* overrides
+    usage: undefined, // body returned by the usage service; undefined = service unavailable (503)
+    fetchCalls: [],
+  };
+  globalThis.fetch = async (url, init) => {
+    ui.fetchCalls.push({ url, headers: init?.headers });
+    const body = typeof ui.usage === 'function' ? ui.usage() : ui.usage; // a function gives a fresh body per call
+    return { ok: !!body, status: body ? 200 : 503, json: async () => body };
+  };
   const next = () => ui.answers.shift();
   const commands = {};
   const disposable = { dispose() {} };
@@ -49,7 +75,7 @@ function setup() {
     l10n: { t: (s, ...args) => s.replace(/\{(\d+)\}/g, (_, i) => String(args[i])) },
     window: {
       state: { focused: true },
-      createStatusBarItem: () => ({ show() {}, dispose() {} }),
+      createStatusBarItem: () => (ui.statusItem = { show() {}, dispose() {} }),
       createQuickPick: () => {
         const handlers = {};
         const qp = {
@@ -105,7 +131,8 @@ function setup() {
       registerCommand: (id, fn) => ((commands[id] = fn), disposable),
       executeCommand: async () => {},
     },
-    workspace: { getConfiguration: () => ({ get: (_key, def) => def }) },
+    workspace: { getConfiguration: () => ({ get: (key, def) => (key in ui.config ? ui.config[key] : def) }) },
+    env: { language: 'en' },
     extensions: { getExtension: () => undefined },
     StatusBarAlignment: { Left: 1, Right: 2 },
     QuickPickItemKind: { Separator: -1, Default: 0 },
@@ -177,4 +204,4 @@ const pickButton = (name, tooltip) => items => {
   return { item, button: item.buttons.find(b => b.tooltip === tooltip) };
 };
 
-module.exports = { setup, account, credentials, pickProfile, pickButton, tick, DAY };
+module.exports = { setup, account, credentials, usageBody, pickProfile, pickButton, tick, DAY };

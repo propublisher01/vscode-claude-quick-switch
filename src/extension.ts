@@ -13,7 +13,22 @@ interface ProfileMeta {
   accountUuid?: string; // missing on profiles saved before 1.2.0 until migrated
   organizationUuid?: string;
   refreshExpiresAt?: number; // when the saved refresh token expires (ms epoch)
+  plan?: string; // e.g. "Max 20x", "Team"
+  usage?: UsageSnapshot; // last known usage of the account
   savedAt: number;
+}
+
+/** One rate-limit window (5-hour session or week). */
+interface UsageWindow {
+  percent: number;
+  resetsAt?: number; // ms epoch
+}
+
+/** Usage of an account at a point in time. */
+interface UsageSnapshot {
+  fetchedAt: number;
+  fiveHour?: UsageWindow;
+  sevenDay?: UsageWindow;
 }
 
 /** Identity of an account, from .claude.json or from a profile. */
@@ -146,13 +161,28 @@ function sameAccount(a: AccountId, b: AccountId): boolean {
 }
 
 /** Non-sensitive fields of a credentials payload. */
-function parseCredentials(raw: string): { organizationUuid?: string; refreshExpiresAt?: number } {
+function parseCredentials(raw: string): { organizationUuid?: string; refreshExpiresAt?: number; plan?: string } {
   try {
     const json = JSON.parse(raw);
-    return { organizationUuid: json.organizationUuid, refreshExpiresAt: json.claudeAiOauth?.refreshTokenExpiresAt };
+    const oauth = json.claudeAiOauth;
+    return {
+      organizationUuid: json.organizationUuid,
+      refreshExpiresAt: oauth?.refreshTokenExpiresAt,
+      plan: planLabel(oauth?.subscriptionType, oauth?.rateLimitTier),
+    };
   } catch {
     return {};
   }
+}
+
+/** "max" + "default_claude_max_20x" → "Max 20x"; "team" → "Team". */
+function planLabel(subscriptionType?: string, rateLimitTier?: string): string | undefined {
+  if (!subscriptionType) {
+    return undefined;
+  }
+  const name = subscriptionType.charAt(0).toUpperCase() + subscriptionType.slice(1);
+  const multiplier = /(\d+x)\b/.exec(rateLimitTier ?? '')?.[1];
+  return multiplier ? `${name} ${multiplier}` : name;
 }
 
 /**
@@ -183,10 +213,14 @@ async function setProfiles(ctx: vscode.ExtensionContext, profiles: ProfileMeta[]
 /** Saves a profile's secret and metadata (replacing any profile with the same name). */
 async function storeProfile(ctx: vscode.ExtensionContext, name: string, secret: ProfileSecret): Promise<ProfileMeta> {
   await ctx.secrets.store(secretKey(name), JSON.stringify(secret));
+  const previous = getProfiles(ctx).find(p => p.name === name);
+  const creds = parseCredentials(secret.credentials);
   const meta: ProfileMeta = {
     name,
     ...accountIdOf(secret.oauthAccount),
-    refreshExpiresAt: parseCredentials(secret.credentials).refreshExpiresAt,
+    refreshExpiresAt: creds.refreshExpiresAt,
+    plan: creds.plan ?? previous?.plan,
+    usage: previous?.usage,
     savedAt: Date.now(),
   };
   const profiles = getProfiles(ctx).filter(p => p.name !== name);
@@ -232,12 +266,12 @@ async function readProfileSecret(ctx: vscode.ExtensionContext, name: string): Pr
   return raw ? JSON.parse(raw) : undefined;
 }
 
-/** Fills the UUIDs and expiry of profiles saved before 1.2.0 (they only had email + organization name). */
+/** Fills what older profiles lack: UUIDs and expiry (before 1.2.0), plan (before 1.4.0). */
 async function migrateProfiles(ctx: vscode.ExtensionContext): Promise<void> {
   const profiles = getProfiles(ctx);
   let changed = false;
   for (const p of profiles) {
-    if (p.accountUuid) {
+    if (p.accountUuid && p.plan) {
       continue;
     }
     const secret = await readProfileSecret(ctx, p.name);
@@ -245,9 +279,11 @@ async function migrateProfiles(ctx: vscode.ExtensionContext): Promise<void> {
       continue;
     }
     const id = accountIdOf(secret.oauthAccount);
+    const creds = parseCredentials(secret.credentials);
     p.accountUuid = id.accountUuid;
     p.organizationUuid = id.organizationUuid;
-    p.refreshExpiresAt = parseCredentials(secret.credentials).refreshExpiresAt;
+    p.refreshExpiresAt ??= creds.refreshExpiresAt;
+    p.plan = creds.plan;
     changed = true;
   }
   if (changed) {
@@ -299,6 +335,219 @@ async function applyProfile(ctx: vscode.ExtensionContext, profile: ProfileMeta):
   config.oauthAccount = secret.oauthAccount;
   writeCredentialsRaw(secret.credentials);
   writeFileAtomic(globalConfigPath(), JSON.stringify(config, null, 2));
+}
+
+// ---------------------------------------------------------------------------
+// Usage (5-hour session and weekly limits)
+// ---------------------------------------------------------------------------
+
+const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+/** Usage older than this is refreshed when the account list opens. */
+const USAGE_FRESH_MS = 60 * 1000;
+
+/** Delay before the next poll; grows after a "too many requests" answer. */
+let usageBackoffMs = 0;
+let usageInFlight: Promise<void> | undefined;
+/** Alerts already shown, so each limit window is reported once. */
+const alertedWindows = new Set<string>();
+
+function parseWindow(raw: any): UsageWindow | undefined {
+  if (!raw || typeof raw.utilization !== 'number') {
+    return undefined;
+  }
+  const resetsAt = raw.resets_at ? Date.parse(raw.resets_at) : NaN;
+  return { percent: Math.round(raw.utilization), resetsAt: Number.isNaN(resetsAt) ? undefined : resetsAt };
+}
+
+function parseUsage(json: any, fetchedAt: number): UsageSnapshot | undefined {
+  const fiveHour = parseWindow(json?.five_hour);
+  const sevenDay = parseWindow(json?.seven_day);
+  return fiveHour || sevenDay ? { fetchedAt, fiveHour, sevenDay } : undefined;
+}
+
+/** Usage cached by Claude Code in .claude.json, if it belongs to `account`. */
+function readCachedUsage(account: AccountId): UsageSnapshot | undefined {
+  try {
+    const cache = readGlobalConfig().cachedUsageUtilization;
+    if (!cache || cache.accountUuid !== account.accountUuid) {
+      return undefined;
+    }
+    return parseUsage(cache.utilization, cache.fetchedAtMs);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Asks the usage service for the active account, like Claude Code does. Only the access token of the
+ * active account is used, and only while it is still valid: tokens are never refreshed here, because
+ * that would invalidate the ones Claude Code holds.
+ */
+async function fetchUsage(credentials: string): Promise<UsageSnapshot | undefined> {
+  let token: string | undefined;
+  try {
+    const oauth = JSON.parse(credentials).claudeAiOauth;
+    if (oauth?.accessToken && (!oauth.expiresAt || oauth.expiresAt > Date.now() + 60 * 1000)) {
+      token = oauth.accessToken;
+    }
+  } catch {
+    return undefined;
+  }
+  if (!token) {
+    return undefined;
+  }
+  const response = await fetch(USAGE_URL, {
+    headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20', 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(5000),
+  });
+  if (response.status === 429) {
+    usageBackoffMs = Math.min(Math.max(usageBackoffMs * 2, 5 * 60 * 1000), 60 * 60 * 1000);
+    return undefined;
+  }
+  if (!response.ok) {
+    return undefined;
+  }
+  usageBackoffMs = 0;
+  return parseUsage(await response.json(), Date.now());
+}
+
+function usageRefreshMinutes(): number {
+  return vscode.workspace.getConfiguration(CONFIG_SECTION).get<number>('usageRefreshMinutes', 5);
+}
+
+/** Updates the active profile's usage (service, else Claude Code's cache), then the UI and alerts. */
+function refreshUsage(ctx: vscode.ExtensionContext, network = true): Promise<void> {
+  // `.finally` runs asynchronously, so the lock is always released after being set.
+  usageInFlight ??= doRefreshUsage(ctx, network).finally(() => (usageInFlight = undefined));
+  return usageInFlight;
+}
+
+async function doRefreshUsage(ctx: vscode.ExtensionContext, network: boolean): Promise<void> {
+  const { account, credentials, mismatch } = readSignIn();
+  const profile = account && !mismatch ? getProfiles(ctx).find(p => sameAccount(p, account)) : undefined;
+  if (!account || !profile) {
+    return;
+  }
+  let usage: UsageSnapshot | undefined;
+  if (network && usageRefreshMinutes() > 0) {
+    usage = await fetchUsage(credentials).catch(() => undefined);
+  }
+  const cached = readCachedUsage(account);
+  if (!usage || (cached && cached.fetchedAt > usage.fetchedAt)) {
+    usage = cached ?? usage;
+  }
+  if (!usage || (profile.usage && profile.usage.fetchedAt >= usage.fetchedAt)) {
+    return;
+  }
+  await setProfiles(ctx, getProfiles(ctx).map(p => (p.name === profile.name ? { ...p, usage } : p)));
+  updateStatus(ctx);
+  void checkUsageAlert(ctx, { ...profile, usage }); // not awaited: the notification may stay open
+}
+
+/** A window's usage as of now: a window whose reset time has passed is back to 0 %. */
+function currentPercent(w: UsageWindow | undefined): number | undefined {
+  if (!w) {
+    return undefined;
+  }
+  return w.resetsAt && w.resetsAt <= Date.now() ? 0 : w.percent;
+}
+
+/** The highest usage of the two windows (the limit you'll hit first). */
+function peakPercent(usage: UsageSnapshot | undefined): number | undefined {
+  const values = [currentPercent(usage?.fiveHour), currentPercent(usage?.sevenDay)].filter((v): v is number => v !== undefined);
+  return values.length ? Math.max(...values) : undefined;
+}
+
+function formatTime(ms: number): string {
+  const date = new Date(ms);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  return date.toLocaleString(vscode.env.language, sameDay ? { hour: '2-digit', minute: '2-digit' } : { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+function formatAge(ms: number): string {
+  const minutes = Math.floor((Date.now() - ms) / 60000);
+  if (minutes < 60) {
+    return vscode.l10n.t('{0} min ago', Math.max(1, minutes));
+  }
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? vscode.l10n.t('{0} h ago', hours) : vscode.l10n.t('{0} d ago', Math.floor(hours / 24));
+}
+
+/** Short usage text for the account list, e.g. "5h 12% · week 40%". */
+function describeUsage(usage: UsageSnapshot | undefined, active: boolean): string | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  const parts = [];
+  const five = currentPercent(usage.fiveHour);
+  const week = currentPercent(usage.sevenDay);
+  if (five !== undefined) {
+    parts.push(vscode.l10n.t('5h {0}%', five));
+  }
+  if (week !== undefined) {
+    parts.push(vscode.l10n.t('week {0}%', week));
+  }
+  if (!parts.length) {
+    return undefined;
+  }
+  const text = parts.join(' · ');
+  const icon = (peakPercent(usage) ?? 0) >= 80 ? '$(warning) ' : '';
+  // Inactive accounts show their last known usage, which can be old.
+  return active || Date.now() - usage.fetchedAt < 10 * 60 * 1000 ? `${icon}${text}` : `${icon}${text} (${formatAge(usage.fetchedAt)})`;
+}
+
+/** Usage lines for the status bar tooltip. */
+function usageTooltip(usage: UsageSnapshot | undefined): string {
+  if (!usage) {
+    return '';
+  }
+  const line = (label: string, w: UsageWindow | undefined) => {
+    const percent = currentPercent(w);
+    if (percent === undefined) {
+      return '';
+    }
+    const reset = w!.resetsAt && w!.resetsAt > Date.now() ? ` — ${vscode.l10n.t('resets {0}', formatTime(w!.resetsAt))}` : '';
+    return `\n\n${label}: ${percent}%${reset}`;
+  };
+  return line(vscode.l10n.t('Session (5 h)'), usage.fiveHour) + line(vscode.l10n.t('Week'), usage.sevenDay);
+}
+
+/** Warns once per limit window when the active account nears its limit, and offers the least used account. */
+async function checkUsageAlert(ctx: vscode.ExtensionContext, profile: ProfileMeta): Promise<void> {
+  const threshold = vscode.workspace.getConfiguration(CONFIG_SECTION).get<number>('usageAlertThreshold', 90);
+  if (!threshold || !vscode.window.state.focused) {
+    return;
+  }
+  const windows: [string, UsageWindow | undefined][] = [
+    [vscode.l10n.t('5-hour session'), profile.usage?.fiveHour],
+    [vscode.l10n.t('weekly'), profile.usage?.sevenDay],
+  ];
+  const hit = windows.find(([, w]) => (currentPercent(w) ?? 0) >= threshold);
+  if (!hit) {
+    return;
+  }
+  const [label, window] = hit;
+  // The service returns slightly different reset times on each call (fractions of a second): round them.
+  const key = `${profile.name}|${label}|${window!.resetsAt ? Math.round(window!.resetsAt / 60000) : ''}`;
+  if (alertedWindows.has(key)) {
+    return;
+  }
+  alertedWindows.add(key);
+
+  const best = getProfiles(ctx)
+    .filter(p => !sameAccount(p, profile) && !isExpired(p.refreshExpiresAt))
+    .sort((a, b) => (peakPercent(a.usage) ?? 50) - (peakPercent(b.usage) ?? 50))[0];
+  const reset = window!.resetsAt ? ` ${vscode.l10n.t('(resets {0})', formatTime(window!.resetsAt))}` : '';
+  const message = vscode.l10n.t('"{0}" has used {1}% of its {2} limit.', profile.name, currentPercent(window)!, label) + reset;
+  const bestPercent = best && peakPercent(best.usage);
+  const switchLabel =
+    best && (bestPercent === undefined
+      ? vscode.l10n.t('Switch to "{0}"', best.name)
+      : vscode.l10n.t('Switch to "{0}" ({1}%)', best.name, bestPercent));
+  const choice = await vscode.window.showWarningMessage(message, ...(switchLabel ? [switchLabel] : []));
+  if (best && choice === switchLabel) {
+    await switchTo(ctx, best);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -394,10 +643,17 @@ async function switchTo(ctx: vscode.ExtensionContext, target: ProfileMeta): Prom
     await ctx.globalState.update(PREVIOUS_KEY, leaving.name);
   }
   updateStatus(ctx);
+  void refreshUsage(ctx);
   await offerReload(vscode.l10n.t('Claude account: {0} ({1}).', target.name, target.email));
 }
 
 async function cmdSwitch(ctx: vscode.ExtensionContext): Promise<void> {
+  // Fresh usage for the active account, without making the list wait more than a moment.
+  const signedIn = readCurrentAccount();
+  const activeProfile = signedIn && getProfiles(ctx).find(p => sameAccount(p, signedIn));
+  if (activeProfile && (!activeProfile.usage || Date.now() - activeProfile.usage.fetchedAt > USAGE_FRESH_MS)) {
+    await Promise.race([refreshUsage(ctx), new Promise(resolve => setTimeout(resolve, 1500))]);
+  }
   const profiles = getProfiles(ctx);
   const current = readCurrentAccount();
 
@@ -410,7 +666,10 @@ async function cmdSwitch(ctx: vscode.ExtensionContext): Promise<void> {
     return {
       label: `${active ? '$(check)' : '$(account)'} ${p.name}`,
       description: p.email,
-      detail: [p.organization, describeExpiry(profileExpiry(p, active))].filter(Boolean).join('  ·  ') || undefined,
+      detail:
+        [p.plan, p.organization, describeUsage(p.usage, active), describeExpiry(profileExpiry(p, active))]
+          .filter(Boolean)
+          .join('  ·  ') || undefined,
       buttons: [renameButton, deleteButton],
       profile: p,
     };
@@ -671,6 +930,7 @@ async function signInNewAccount(ctx: vscode.ExtensionContext, current: AccountId
     await ctx.globalState.update(PREVIOUS_KEY, left.name);
   }
   if (meta) {
+    void refreshUsage(ctx);
     await offerReload(vscode.l10n.t('Account "{0}" ({1}) added and active.', meta.name, meta.email));
   }
 }
@@ -753,17 +1013,26 @@ function updateStatus(ctx: vscode.ExtensionContext): void {
     statusItem.tooltip = vscode.l10n.t('No Claude account signed in');
   } else {
     const profile = getProfiles(ctx).find(p => sameAccount(p, account));
-    statusItem.text = `${mismatch ? '$(warning)' : '$(sparkle)'} Claude: ${profile?.name ?? account.email}`;
+    const usage = mismatch ? undefined : profile?.usage;
+    const peak = peakPercent(usage);
+    const showUsage = vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('showUsageInStatusBar', true);
+    statusItem.text =
+      `${mismatch ? '$(warning)' : '$(sparkle)'} Claude: ${profile?.name ?? account.email}` +
+      (showUsage && peak !== undefined ? ` · ${peak}%` : '');
     const warning = mismatch
       ? `\n\n$(warning) ${vscode.l10n.t('Inconsistent sign-in: another Claude Code session has overwritten the tokens. Switch account to fix it.')}`
       : '';
+    const plan = profile?.plan ?? readSignIn().creds.plan;
     statusItem.tooltip = new vscode.MarkdownString(
       `**${vscode.l10n.t('Claude account')}**\n\n${account.email}${account.organization ? `\n\n${account.organization}` : ''}` +
+        `${plan ? `\n\n${vscode.l10n.t('Plan: {0}', plan)}` : ''}${usageTooltip(usage)}` +
         `${profile ? '' : `\n\n_${vscode.l10n.t('Not saved')}_`}${warning}\n\n${vscode.l10n.t('Click to switch account')}`,
       true,
     );
-    if (mismatch) {
-      statusItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+    if (mismatch || (peak ?? 0) >= 80) {
+      statusItem.backgroundColor = new vscode.ThemeColor(
+        !mismatch && (peak ?? 0) >= 95 ? 'statusBarItem.errorBackground' : 'statusBarItem.warningBackground',
+      );
     }
   }
   statusItem.show();
@@ -793,6 +1062,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
     clearTimeout(timer);
     timer = setTimeout(() => {
       updateStatus(ctx);
+      void refreshUsage(ctx, false); // Claude Code may have updated its usage cache
       if (readSignIn().mismatch) {
         // A sign-in writes the tokens then .claude.json: only report a mismatch that lasts.
         setTimeout(() => checkSignIn(ctx), 3000);
@@ -807,11 +1077,27 @@ export function activate(ctx: vscode.ExtensionContext): void {
     fs.watchFile(file, { interval: 3000 }, onChange);
     ctx.subscriptions.push({ dispose: () => fs.unwatchFile(file, onChange) });
   }
+  // Usage: poll the active account while this window is focused (one poller across windows), and on focus.
+  let lastUsagePoll = 0;
+  const pollUsage = () => {
+    const minutes = usageRefreshMinutes();
+    const every = Math.max(minutes * 60 * 1000, usageBackoffMs);
+    if (vscode.window.state.focused && Date.now() - lastUsagePoll >= (minutes > 0 ? every : 60 * 1000)) {
+      lastUsagePoll = Date.now();
+      refreshUsage(ctx);
+    }
+  };
+  const poller = setInterval(pollUsage, 30 * 1000);
+  ctx.subscriptions.push({ dispose: () => clearInterval(poller) });
+
   ctx.subscriptions.push(
     vscode.window.onDidChangeWindowState(state => {
       if (state.focused && pendingCheck) {
         pendingCheck = false;
         checkSignIn(ctx);
+      }
+      if (state.focused) {
+        pollUsage();
       }
     }),
   );
@@ -820,6 +1106,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
   migrateProfiles(ctx).then(() => {
     updateStatus(ctx);
     checkSignIn(ctx);
+    lastUsagePoll = Date.now();
+    void refreshUsage(ctx);
   });
 }
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.0
+
+- **Usage in the status bar**: the active account's usage (`· 42%`), yellow from 80%, red from 95%; the tooltip shows the 5-hour session and weekly limits with their reset times, and the plan.
+- **Usage and plan in the account list**, with the age of the last known value for inactive accounts.
+- **Limit alert**: at 90% of a limit, offers to switch to the least used account in one click (`claudeQuickSwitch.usageAlertThreshold`).
+- New settings `showUsageInStatusBar` and `usageRefreshMinutes` (`0` = no network request, use Claude Code's cache only).
+
 ## 1.3.0
 
 - **Switch to Previous Account** (`Ctrl+Alt+Shift+C`, `Cmd+Alt+Shift+C` on macOS): toggles between your last two accounts without opening the list.

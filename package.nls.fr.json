@@ -11,5 +11,8 @@
   "config.reloadAfterSwitch.never": "Ne jamais recharger.",
   "config.claudePath.description": "Chemin du CLI claude utilisé par « Ajouter un compte ». Vide = binaire fourni par l'extension Claude Code, sinon `claude` du PATH.",
   "command.switchPrevious.title": "Revenir au compte précédent",
-  "command.rename.title": "Renommer un profil"
+  "command.rename.title": "Renommer un profil",
+  "config.showUsageInStatusBar.description": "Afficher la consommation du compte actif (la plus haute des limites 5 h et hebdomadaire) dans la barre d'état.",
+  "config.usageRefreshMinutes.description": "Fréquence (en minutes) de mise à jour de la consommation du compte actif auprès d'Anthropic, quand VS Code a le focus. 0 = ne jamais appeler le service, lire seulement la consommation mise en cache par Claude Code.",
+  "config.usageAlertThreshold.description": "Prévenir quand le compte actif atteint ce pourcentage de sa limite de 5 h ou hebdomadaire, et proposer de passer au compte le moins utilisé. 0 = pas d'alerte."
 }

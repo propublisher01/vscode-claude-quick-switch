@@ -11,5 +11,8 @@
   "config.reloadAfterSwitch.never": "Never reload.",
   "config.claudePath.description": "Path of the claude CLI used by \"Add Account\". Empty = the binary shipped with the Claude Code extension, otherwise `claude` from the PATH.",
   "command.switchPrevious.title": "Switch to Previous Account",
-  "command.rename.title": "Rename Profile"
+  "command.rename.title": "Rename Profile",
+  "config.showUsageInStatusBar.description": "Show the usage of the active account (highest of the 5-hour and weekly limits) in the status bar.",
+  "config.usageRefreshMinutes.description": "How often (in minutes) to refresh the active account's usage from Anthropic, while VS Code is focused. 0 = never call the service, only read the usage cached by Claude Code.",
+  "config.usageAlertThreshold.description": "Warn when the active account reaches this percentage of its 5-hour or weekly limit, and offer to switch to the least used account. 0 = no warning."
 }

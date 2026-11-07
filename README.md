@@ -7,6 +7,9 @@ Personal and work subscriptions, several organizations, a second account for whe
 ## Features
 
 - **One-click switch**: click `✨ Claude: <profile>` in the status bar and pick an account. Claude Code picks it up right away, in every window — no reload needed.
+- **Usage at a glance**: the status bar shows how much of its limits the active account has used (`✨ Claude: work · 42%`), turning yellow then red near the limit; the tooltip details the 5-hour session and weekly limits with their reset times, and the plan (Pro, Max 5x/20x, Team…).
+- **Know which account has room left**: the account list shows each account's plan and last known usage.
+- **Never get stuck at the limit**: when the active account reaches 90% of a limit, you're offered to switch to the least used account in one click.
 - **Back and forth in one keystroke**: `Ctrl+Alt+Shift+C` (`Cmd+Alt+Shift+C` on macOS) switches back to the previous account.
 - **Add an account without leaving VS Code**: *Add account…* runs `claude auth login` in a terminal, detects when you're signed in in the browser, and saves the new profile.
 - **Tokens stay secure**: saved accounts are stored in VS Code's SecretStorage (your OS keychain / Windows Credential Manager), never in plain text.
@@ -40,6 +43,9 @@ Commands (`Ctrl+Shift+P`):
 | Setting | Default | Description |
 | --- | --- | --- |
 | `claudeQuickSwitch.reloadAfterSwitch` | `never` | `ask`, `always` or `never` reload the window after switching. Not needed with current versions of Claude Code. |
+| `claudeQuickSwitch.showUsageInStatusBar` | `true` | Show the active account's usage (highest of the 5-hour and weekly limits) in the status bar. |
+| `claudeQuickSwitch.usageRefreshMinutes` | `5` | How often to refresh the active account's usage while VS Code is focused. `0` = never contact the service, only read the usage cached by Claude Code. |
+| `claudeQuickSwitch.usageAlertThreshold` | `90` | Percentage of a limit that triggers the switch suggestion. `0` = off. |
 | `claudeQuickSwitch.claudePath` | *(empty)* | Path of the `claude` CLI used by *Add account*. Empty = the binary shipped with the Claude Code extension, otherwise `claude` from the PATH. |
 
 ## How it works
@@ -49,7 +55,9 @@ Claude Code keeps its sign-in in two files:
 - `~/.claude/.credentials.json`: OAuth tokens (on macOS: the `Claude Code-credentials` item of the login Keychain)
 - `~/.claude.json`: the `oauthAccount` key (account information)
 
-Each profile keeps a copy of this data in SecretStorage and restores it when you switch. Only the `oauthAccount` key of `~/.claude.json` is modified. `CLAUDE_CONFIG_DIR` is supported.
+Each profile keeps a copy of this data in SecretStorage and restores it when you switch.
+
+**Usage**: like Claude Code's `/usage`, the extension asks `api.anthropic.com` for the usage of the **active** account, with that account's current access token — every 5 minutes at most, only while VS Code is focused. Tokens are never refreshed by the extension and never sent anywhere else. The usage of other accounts is the last value seen while they were active. Set `claudeQuickSwitch.usageRefreshMinutes` to `0` to make no network request at all (the usage cached by Claude Code is then used). Only the `oauthAccount` key of `~/.claude.json` is modified. `CLAUDE_CONFIG_DIR` is supported.
 
 ## Limitations
 
